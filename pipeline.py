@@ -1,21 +1,22 @@
 
 """
 NEC AI Meeting Summariser - Core Pipeline
-Transcribes audio and generates a summary with action items.
-Logs every summary to a SQLite database.
+Transcribes audio, generates summary with action items, logs to SQLite,
+and notifies n8n webhook for Slack delivery.
 """
 
 import requests
 import sqlite3
+import os
 from datetime import datetime
 from pathlib import Path
 
 
 DB_PATH = "meetings.db"
+N8N_WEBHOOK_URL = "https://pound-pty-compatibility-decor.trycloudflare.com/webhook/meeting-processed"
 
 
 def init_db():
-    """Create the meetings table if it doesn't exist."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -33,7 +34,6 @@ def init_db():
 
 
 def log_meeting(audio_filename, duration, transcript, summary):
-    """Save a summarised meeting to the database."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -50,8 +50,23 @@ def log_meeting(audio_filename, duration, transcript, summary):
     conn.close()
 
 
+def notify_n8n(audio_filename, duration, summary):
+    try:
+        response = requests.post(
+            N8N_WEBHOOK_URL,
+            json={
+                "audio_filename": audio_filename,
+                "duration_seconds": duration,
+                "summary": summary
+            },
+            timeout=15
+        )
+        print(f"n8n notified: {response.status_code}")
+    except Exception as e:
+        print(f"n8n notification error: {e}")
+
+
 def transcribe_audio(audio_path, model_size="base.en"):
-    """Transcribe audio file to text using faster-whisper."""
     from faster_whisper import WhisperModel
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments, info = model.transcribe(audio_path, beam_size=5)
@@ -60,7 +75,6 @@ def transcribe_audio(audio_path, model_size="base.en"):
 
 
 def generate_summary(transcript, model="llama3.2:3b"):
-    """Generate summary and action items from transcript using Ollama."""
     prompt = f"""You are a meeting summariser. Given the following transcript, produce:
 1. A short summary (2-3 sentences)
 2. A list of action items with owners where stated
@@ -85,7 +99,6 @@ ACTION ITEMS:
 
 
 def process_meeting(audio_path):
-    """Full pipeline: audio file to summary with logging."""
     print("Transcribing...")
     transcript, duration = transcribe_audio(audio_path)
 
@@ -100,6 +113,13 @@ def process_meeting(audio_path):
         summary=summary
     )
 
+    print("Notifying n8n...")
+    notify_n8n(
+        audio_filename=Path(audio_path).name,
+        duration=duration,
+        summary=summary
+    )
+
     return {
         "transcript": transcript,
         "summary": summary,
@@ -107,15 +127,10 @@ def process_meeting(audio_path):
     }
 
 
-# Initialise the database on import
 init_db()
 
 
 if __name__ == "__main__":
     result = process_meeting("test_meeting.mp3")
     print("=" * 60)
-    print("TRANSCRIPT:")
-    print(result["transcript"])
-    print("=" * 60)
-    print("SUMMARY:")
     print(result["summary"])
